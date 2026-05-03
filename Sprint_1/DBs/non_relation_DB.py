@@ -7,7 +7,8 @@ from fastapi import FastAPI,Depends,Request
 from pydantic import BaseModel
 from neo4j import AsyncGraphDatabase
 from contextlib import asynccontextmanager
-
+from motor.motor_asyncio import AsyncIOMotorClient
+import redis.asyncio as redis
 
 load_dotenv()
 
@@ -38,16 +39,60 @@ class Neo4jManager:
     async def close(self):
         if self.driver:
             await self.driver.close()
+class RedisManager:
+    def __init__(self):
+        self.redis = None
+    
+    async def connect(self):
+        self.redis = redis.from_url("redis://localhost:6379")
+        await self.redis.ping()
+    
+    async def close(self):
+        if self.redis:
+            await self.redis.close()
 
+
+class MongoDBManager:
+    def __init__(self):
+        self.client = None
+        self.db = None
+    
+    async def connect(self):
+        self.client = AsyncIOMotorClient(mongo_db_url)
+        list_of_db = await self.client.list_database_names()
+        print(list_of_db)
+        self.db = self.client.test
+    
+    async def close(self):
+        if self.client:
+            self.client.close()
+mongo_db_con = MongoDBManager()
 neo4j_database_con = Neo4jManager()
+redis_con = RedisManager()
 
 @asynccontextmanager
-async def get_neo4j_session(app:FastAPI):
+async def lifespan(app: FastAPI):
+    # 1. Startup: Connect to everything
+    await mongo_db_con.connect()
     await neo4j_database_con.connect()
-    yield {"neo4j_driver": neo4j_database_con.driver}
+    await redis_con.connect()
+    print("Databases connected")
+    
+    # 2. Yield: This makes the drivers available to the app
+    # We attach them to 'app.state' so they are easy to access
+    yield {
+        "mongo": mongo_db_con.db,
+        "neo4j": neo4j_database_con.driver,
+        "redis": redis_con.redis
+    }
+    
+    # 3. Shutdown: Close everything
+    await mongo_db_con.close()
     await neo4j_database_con.close()
+    await redis_con.close()
+    print("Databases closed")
 
-app = FastAPI(lifespan=get_neo4j_session)
+app = FastAPI(lifespan=lifespan)
 
 @app.get("/neo4j")
 async def read_neo4j_data(name:str,request:Request):
@@ -62,6 +107,30 @@ async def read_neo4j_data(name:str,request:Request):
             return {"status": "User not found", "searched_for": name}
         return {"status":"Connected",'data':record}
     
+@app.get("/mongo")
+async def read_mongo_data(request:Request):
+    db = request.state.mongo
+    # Just a simple test to show we can read from MongoDB
+    users = await db.users.find().to_list(length=1)
+    # Convert ObjectId to string
+    for user in users:
+        user["_id"] = str(user["_id"])
+    return {"status": "Connected", "data": users}
+
+@app.post("/redis")
+async def write_to_redis(key: str, value: str, request: Request):
+    redis_client = request.state.redis
+    await redis_client.set(key, value)
+    return {"status": "Value written to Redis"}
+
+@app.get("/redis")
+async def read_from_redis(key: str, request: Request):
+    redis_client = request.state.redis
+    value = await redis_client.get(key)
+    if value is None:
+        return {"status": "Key not found in Redis", "key": key}
+    return {"status": "Value retrieved from Redis", "key": key, "value": value.decode('utf-8')}
+
 @app.post("/neo4j")
 async def create_user(user:UserSchema,request:Request):
     driver = request.state.neo4j_driver

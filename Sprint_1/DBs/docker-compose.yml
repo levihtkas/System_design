@@ -1,0 +1,14 @@
+version: '3.8'
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: redis_gps_cache
+    ports:
+      - "6379:6379"  # Maps host port 6379 to container port 6379
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes # Enables persistent data storage
+    restart: unless-stopped
+
+volumes:
+  redis_data:
